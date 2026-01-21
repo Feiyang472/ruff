@@ -45,17 +45,16 @@ use salsa::plumbing::AsId;
 use crate::Db;
 use crate::semantic_index::ast_ids::node_key::ExpressionNodeKey;
 use crate::semantic_index::definition::Definition;
-use crate::semantic_index::definition::DefinitionKind;
 use crate::semantic_index::expression::Expression;
 use crate::semantic_index::scope::ScopeId;
 use crate::semantic_index::{SemanticIndex, semantic_index};
 use crate::types::diagnostic::TypeCheckDiagnostics;
-use crate::types::function::{FunctionDecorators, FunctionType};
-use crate::types::generics::{Specialization, typing_self};
+use crate::types::function::FunctionType;
+use crate::types::generics::Specialization;
 use crate::types::unpacker::{UnpackResult, Unpacker};
 use crate::types::{
-    BoundTypeVarInstance, ClassLiteral, KnownClass, StaticClassLiteral, Truthiness, Type,
-    TypeAndQualifiers, declaration_type,
+    ClassLiteral, KnownClass, StaticClassLiteral, Truthiness, Type, TypeAndQualifiers,
+    declaration_type,
 };
 use crate::unpack::Unpack;
 use builder::TypeInferenceBuilder;
@@ -534,16 +533,12 @@ fn unpack_cycle_recover<'db>(
 /// `Some(class)` if either the immediate parent scope is a class OR the immediate parent
 /// scope is a type-parameters scope and the grandparent scope is a class.
 ///
-/// This is a Salsa-tracked query to avoid repeated scope walking when `Self` is used
-/// multiple times in the same method.
-///
 /// Returns `None` if no enclosing class is found.
-#[salsa::tracked]
 pub(crate) fn nearest_enclosing_class<'db>(
     db: &'db dyn Db,
-    scope: ScopeId<'db>,
+    semantic: &SemanticIndex<'db>,
+    scope: ScopeId,
 ) -> Option<StaticClassLiteral<'db>> {
-    let semantic = semantic_index(db, scope.file(db));
     semantic
         .ancestor_scopes(scope.file_scope_id(db))
         .find_map(|(_, ancestor_scope)| {
@@ -568,74 +563,6 @@ pub(crate) fn function_type_from_definition<'db>(
         .undecorated_type()
         .unwrap_or_else(|| inference.declaration_type(definition).inner_type())
         .as_function_literal()
-}
-
-/// Result of resolving `typing.Self` in a type expression.
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, salsa::Update)]
-pub(crate) enum TypingSelfResult<'db> {
-    /// Successfully resolved to a bound type variable.
-    Bound(BoundTypeVarInstance<'db>),
-    /// No binding context available; return `typing.Self` as-is.
-    Unbound,
-    /// Error: `Self` used outside of a class.
-    NotInClass,
-    /// Error: `Self` used in a static method.
-    InStaticMethod,
-    /// Error: `Self` used in a metaclass.
-    InMetaclass,
-}
-
-/// Resolve and validate `typing.Self` for a given scope.
-///
-/// This is a Salsa-tracked query that caches the entire validation process
-/// for `Self`, including:
-/// - Finding the enclosing class
-/// - Creating the bound type variable
-/// - Checking for staticmethod context
-/// - Checking for metaclass context
-#[salsa::tracked]
-pub(crate) fn resolve_typing_self<'db>(
-    db: &'db dyn Db,
-    scope_id: ScopeId<'db>,
-    typevar_binding_context: Option<Definition<'db>>,
-) -> TypingSelfResult<'db> {
-    // Find the enclosing class.
-    let Some(class) = nearest_enclosing_class(db, scope_id) else {
-        return TypingSelfResult::NotInClass;
-    };
-
-    // Create the bound Self type variable.
-    let bound_self = typing_self(db, scope_id, typevar_binding_context, class.into());
-
-    // Check if Self is being used in a static method.
-    if let Some(definition) = bound_self.and_then(|bound| bound.binding_context(db).definition()) {
-        // Quick check: if the function has no decorators, it can't be a staticmethod.
-        let is_staticmethod = if let DefinitionKind::Function(func_node) = definition.kind(db) {
-            let module = parsed_module(db, definition.file(db)).load(db);
-            let func = func_node.node(&module);
-            !func.decorator_list.is_empty()
-                && function_type_from_definition(db, definition).is_some_and(|func| {
-                    func.has_known_decorator(db, FunctionDecorators::STATICMETHOD)
-                })
-        } else {
-            false
-        };
-
-        if is_staticmethod {
-            return TypingSelfResult::InStaticMethod;
-        }
-    }
-
-    // Check if Self is being used in a metaclass.
-    // We exclude `type` itself since it's defined in typeshed.
-    if !class.is_known(db, KnownClass::Type) && class.is_metaclass(db) {
-        return TypingSelfResult::InMetaclass;
-    }
-
-    match bound_self {
-        Some(bound) => TypingSelfResult::Bound(bound),
-        None => TypingSelfResult::Unbound,
-    }
 }
 
 /// This function walks up the ancestor scopes starting from the given scope,

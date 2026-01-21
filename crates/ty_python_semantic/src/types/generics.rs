@@ -85,13 +85,9 @@ pub(crate) fn bind_typevar<'db>(
 }
 
 /// Create a `typing.Self` type variable for a given class.
-///
-/// This is a Salsa-tracked query to avoid repeated scope walking when `Self` is used
-/// multiple times in the same method.
-#[salsa::tracked]
 pub(crate) fn typing_self<'db>(
     db: &'db dyn Db,
-    function_scope_id: ScopeId<'db>,
+    function_scope_id: ScopeId,
     typevar_binding_context: Option<Definition<'db>>,
     class: ClassLiteral<'db>,
 ) -> Option<BoundTypeVarInstance<'db>> {

@@ -1,4 +1,5 @@
 use compact_str::{CompactString, ToCompactString};
+use infer::nearest_enclosing_class;
 use itertools::{Either, Itertools};
 use ruff_diagnostics::{Edit, Fix};
 
@@ -62,7 +63,7 @@ use crate::types::function::{
 pub(crate) use crate::types::generics::GenericContext;
 use crate::types::generics::{
     ApplySpecialization, InferableTypeVars, Specialization, SpecializationBuilder, bind_typevar,
-    walk_generic_context,
+    typing_self, walk_generic_context,
 };
 use crate::types::mro::{Mro, MroIterator, StaticMroError};
 pub(crate) use crate::types::narrow::{NarrowingConstraint, infer_narrowing_constraint};
@@ -5662,29 +5663,51 @@ impl<'db> Type<'db> {
                     ],
                 )),
                 SpecialFormType::TypingSelf => {
-                    use infer::{TypingSelfResult, resolve_typing_self};
-                    match resolve_typing_self(db, scope_id, typevar_binding_context) {
-                        TypingSelfResult::Bound(bound) => Ok(Type::TypeVar(bound)),
-                        TypingSelfResult::Unbound => Ok(*self),
-                        TypingSelfResult::NotInClass => Err(InvalidTypeExpressionError {
+                    let index = semantic_index(db, scope_id.file(db));
+                    let Some(class) = nearest_enclosing_class(db, index, scope_id) else {
+                        return Err(InvalidTypeExpressionError {
                             fallback_type: Type::unknown(),
                             invalid_expressions: smallvec_inline![
                                 InvalidTypeExpression::InvalidType(*self, scope_id)
                             ],
-                        }),
-                        TypingSelfResult::InStaticMethod => Err(InvalidTypeExpressionError {
-                            fallback_type: Type::unknown(),
-                            invalid_expressions: smallvec_inline![
-                                InvalidTypeExpression::SelfInStaticMethod
-                            ],
-                        }),
-                        TypingSelfResult::InMetaclass => Err(InvalidTypeExpressionError {
+                        });
+                    };
+
+                    // Create the bound Self type variable.
+                    let bound_self =
+                        typing_self(db, scope_id, typevar_binding_context, class.into());
+
+                    // `Self` cannot be used in a static method.
+                    if let Some(definition) =
+                        bound_self.and_then(|bound| bound.binding_context(db).definition())
+                    {
+                        let is_staticmethod = infer::function_type_from_definition(db, definition)
+                            .is_some_and(|func| {
+                                func.has_known_decorator(db, FunctionDecorators::STATICMETHOD)
+                            });
+
+                        if is_staticmethod {
+                            return Err(InvalidTypeExpressionError {
+                                fallback_type: Type::unknown(),
+                                invalid_expressions: smallvec_inline![
+                                    InvalidTypeExpression::SelfInStaticMethod
+                                ],
+                            });
+                        }
+                    }
+
+                    // `Self` cannot be used in a metaclass (subclass of `type`).
+                    // We exclude `type` itself since it's defined in typeshed.
+                    if !class.is_known(db, KnownClass::Type) && class.is_metaclass(db) {
+                        return Err(InvalidTypeExpressionError {
                             fallback_type: Type::unknown(),
                             invalid_expressions: smallvec_inline![
                                 InvalidTypeExpression::SelfInMetaclass
                             ],
-                        }),
+                        });
                     }
+
+                    Ok(bound_self.map(Type::TypeVar).unwrap_or(*self))
                 }
                 // We ensure that `typing.TypeAlias` used in the expected position (annotating an
                 // annotated assignment statement) doesn't reach here. Using it in any other type
