@@ -2804,7 +2804,7 @@ impl<'db> StaticClassLiteral<'db> {
 
     /// Return `true` if this class is a metaclass (i.e., a subclass of `type`).
     ///
-    /// This is cached to avoid repeated MRO iteration for the same class.
+    /// This is cached to avoid repeated computation for the same class.
     #[salsa::tracked(cycle_initial=is_metaclass_cycle_initial,
         heap_size=ruff_memory_usage::heap_size
     )]
@@ -2814,17 +2814,14 @@ impl<'db> StaticClassLiteral<'db> {
             return true;
         }
 
-        // Quick check: if no explicit bases, can't be a metaclass.
-        if self.explicit_bases(db).is_empty() {
-            return false;
-        }
-
-        // Check if `type` is in the MRO.
-        let Some(type_class) = KnownClass::Type.to_class_literal(db).to_class_type(db) else {
-            return false;
-        };
-
-        self.is_subclass_of(db, None, type_class)
+        // Check if any explicit base is a metaclass. This is more efficient than
+        // iterating the full MRO because explicit bases are typically few, and
+        // recursive calls to is_metaclass are cached.
+        self.explicit_bases(db).iter().any(|base| {
+            base.as_class_literal()
+                .and_then(ClassLiteral::as_static)
+                .is_some_and(|cls| cls.is_metaclass(db))
+        })
     }
 
     /// Return `true` if this class is, or inherits from, a `NamedTuple` (inherits from
