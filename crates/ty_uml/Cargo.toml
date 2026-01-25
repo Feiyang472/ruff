@@ -1,0 +1,37 @@
+[package]
+name = "ty_uml"
+version = "0.0.0"
+publish = false
+authors = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+homepage = { workspace = true }
+documentation = { workspace = true }
+repository = { workspace = true }
+license = { workspace = true }
+
+[dependencies]
+ty_python_semantic = { workspace = true }
+ty_module_resolver = { workspace = true }
+ruff_db = { workspace = true }
+ruff_python_ast = { workspace = true }
+ruff_text_size = { workspace = true }
+
+indexmap = { workspace = true }
+rustc-hash = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+ty_project = { workspace = true, features = ["testing"] }
+ty_vendored = { workspace = true }
+ruff_db = { workspace = true, features = ["testing", "os"] }
+insta = { workspace = true }
+
+[features]
+default = []
+serde = ["dep:serde", "indexmap/serde"]
+
+[lints]
+workspace = true

@@ -30,7 +30,7 @@ use ty_project::{ProjectDatabase, ProjectMetadata};
 use ty_server::run_server;
 use ty_static::EnvVars;
 
-use crate::args::{CheckCommand, Command, TerminalColor};
+use crate::args::{CheckCommand, Command, DiagramType, TerminalColor, UmlCommand};
 use crate::logging::{VerbosityLevel, setup_tracing};
 use crate::printer::Printer;
 pub use args::Cli;
@@ -47,6 +47,7 @@ pub fn run() -> anyhow::Result<ExitStatus> {
     match args.command {
         Command::Server => run_server().map(|()| ExitStatus::Success),
         Command::Check(check_args) => run_check(check_args),
+        Command::Uml(uml_args) => run_uml(uml_args),
         Command::Version => version().map(|()| ExitStatus::Success),
         Command::GenerateShellCompletion { shell } => {
             use std::io::stdout;
@@ -62,6 +63,176 @@ pub(crate) fn version() -> Result<()> {
     let version_info = crate::version::version();
     writeln!(stdout, "ty {}", &version_info)?;
     Ok(())
+}
+
+fn run_uml(args: UmlCommand) -> anyhow::Result<ExitStatus> {
+    use std::io::Write as IoWrite;
+    use ty_uml::{ExtractionConfig, OutputFormat, RenderConfig, extract_diagram, render_to_string};
+
+    let verbosity = args.verbosity.level();
+    let _guard = setup_tracing(verbosity, TerminalColor::Auto)?;
+
+    tracing::debug!("Starting UML generation");
+
+    // Get the current working directory
+    let cwd = {
+        let cwd = std::env::current_dir().context("Failed to get the current working directory")?;
+        SystemPathBuf::from_path_buf(cwd).map_err(|path| {
+            anyhow!(
+                "The current working directory `{}` contains non-Unicode characters.",
+                path.display()
+            )
+        })?
+    };
+
+    // Determine the project path
+    let project_path = args
+        .project
+        .as_ref()
+        .map(|project| {
+            if project.as_std_path().is_dir() {
+                Ok(SystemPath::absolute(project, &cwd))
+            } else {
+                Err(anyhow!(
+                    "Provided project path `{project}` is not a directory"
+                ))
+            }
+        })
+        .transpose()?
+        .unwrap_or_else(|| cwd.clone());
+
+    // Get paths to analyze
+    let analyze_paths: Vec<_> = if args.paths.is_empty() {
+        vec![project_path.clone()]
+    } else {
+        args.paths
+            .iter()
+            .map(|path| SystemPath::absolute(path, &cwd))
+            .collect()
+    };
+
+    // Create the system and database
+    let system = OsSystem::new(&cwd);
+    let project_metadata = ProjectMetadata::discover(&project_path, &system)?;
+    let db = ProjectDatabase::new(project_metadata, system)?;
+
+    // Configure extraction
+    let extraction_config = ExtractionConfig {
+        include_private: args.include_private,
+        include_dunder: args.include_dunder,
+        include_inherited: false,
+        max_depth: Some(args.max_depth),
+        module_filter: None,
+        extract_classes: matches!(args.diagram_type, DiagramType::Class | DiagramType::All),
+        extract_modules: matches!(args.diagram_type, DiagramType::Module | DiagramType::All),
+        extract_calls: matches!(args.diagram_type, DiagramType::Call | DiagramType::All),
+    };
+
+    // Configure rendering
+    let render_config = RenderConfig {
+        title: args.title,
+        show_visibility: args.show_visibility,
+        show_types: args.show_types,
+        show_parameters: true,
+        group_by_module: true,
+        direction: ty_uml::render::DiagramDirection::TopToBottom,
+        color_scheme: ty_uml::render::ColorScheme::Default,
+        show_external_refs: false,
+        max_type_width: Some(40),
+    };
+
+    // Extract diagram from all files in the project
+    let mut diagram = ty_uml::UmlDiagram::new();
+
+    for path in &analyze_paths {
+        // Collect Python files
+        let files = collect_python_files(&db, path);
+
+        for file in files {
+            let file_diagram = extract_diagram(&db, file, &extraction_config);
+            diagram.merge(file_diagram);
+        }
+    }
+
+    // Render the diagram
+    let output_format: OutputFormat = args.format.into();
+    let output = render_to_string(&diagram, output_format, &render_config);
+
+    // Write output
+    if let Some(output_path) = args.output {
+        let output_path = SystemPath::absolute(&output_path, &cwd);
+        std::fs::write(output_path.as_std_path(), &output)
+            .context("Failed to write output file")?;
+        tracing::info!("Wrote UML diagram to {}", output_path);
+    } else {
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(output.as_bytes())?;
+    }
+
+    // Report statistics
+    let stats = diagram.stats();
+    tracing::info!(
+        "Generated diagram with {} classes, {} relationships, {} modules, {} functions, {} calls",
+        stats.class_count,
+        stats.relationship_count,
+        stats.module_count,
+        stats.function_count,
+        stats.call_count
+    );
+
+    Ok(ExitStatus::Success)
+}
+
+/// Collect all Python files from a directory or single file.
+fn collect_python_files(db: &ProjectDatabase, path: &SystemPath) -> Vec<File> {
+    use ruff_db::files::system_path_to_file;
+
+    let mut files = Vec::new();
+
+    if path.as_std_path().is_file() {
+        if let Ok(file) = system_path_to_file(db, path) {
+            files.push(file);
+        }
+    } else if path.as_std_path().is_dir() {
+        // Walk the directory and collect .py files
+        fn walk_dir(db: &ProjectDatabase, dir: &std::path::Path, files: &mut Vec<File>) {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.filter_map(Result::ok) {
+                    let entry_path = entry.path();
+                    if entry_path.is_file() {
+                        if let Some(ext) = entry_path.extension() {
+                            if ext == "py" || ext == "pyi" {
+                                if let Ok(system_path) =
+                                    SystemPathBuf::from_path_buf(entry_path.clone())
+                                {
+                                    if let Ok(file) =
+                                        ruff_db::files::system_path_to_file(db, &system_path)
+                                    {
+                                        files.push(file);
+                                    }
+                                }
+                            }
+                        }
+                    } else if entry_path.is_dir() {
+                        // Skip hidden directories and common non-source directories
+                        if let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) {
+                            if !name.starts_with('.')
+                                && name != "__pycache__"
+                                && name != "node_modules"
+                                && name != ".git"
+                            {
+                                walk_dir(db, &entry_path, files);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        walk_dir(db, path.as_std_path(), &mut files);
+    }
+
+    files
 }
 
 fn run_check(args: CheckCommand) -> anyhow::Result<ExitStatus> {

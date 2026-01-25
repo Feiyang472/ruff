@@ -4425,6 +4425,7 @@ dependencies = [
  "ty_python_semantic",
  "ty_server",
  "ty_static",
+ "ty_uml",
  "wild",
 ]
 
@@ -4721,6 +4722,25 @@ dependencies = [
  "ty_module_resolver",
  "ty_python_semantic",
  "ty_static",
+ "ty_vendored",
+]
+
+[[package]]
+name = "ty_uml"
+version = "0.0.0"
+dependencies = [
+ "indexmap",
+ "insta",
+ "ruff_db",
+ "ruff_python_ast",
+ "ruff_text_size",
+ "rustc-hash",
+ "serde",
+ "thiserror 2.0.17",
+ "tracing",
+ "ty_module_resolver",
+ "ty_project",
+ "ty_python_semantic",
  "ty_vendored",
 ]
 

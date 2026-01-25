@@ -33,6 +33,9 @@ pub(crate) enum Command {
     /// Check a project for type errors.
     Check(CheckCommand),
 
+    /// Generate UML diagrams from Python source code.
+    Uml(UmlCommand),
+
     /// Start the language server
     Server,
 
@@ -253,6 +256,104 @@ impl CheckCommand {
         // Merge with options passed in via --config
         options.combine(self.config.into_options().unwrap_or_default())
     }
+}
+
+/// Command to generate UML diagrams from Python source code.
+#[derive(Debug, Parser)]
+#[allow(clippy::struct_excessive_bools)]
+pub(crate) struct UmlCommand {
+    /// List of files or directories to analyze.
+    #[clap(
+        help = "List of files or directories to analyze [default: the project root]",
+        value_name = "PATH"
+    )]
+    pub paths: Vec<SystemPathBuf>,
+
+    /// Run the command within the given project directory.
+    #[arg(long, value_name = "PROJECT")]
+    pub project: Option<SystemPathBuf>,
+
+    /// Output format for the UML diagram.
+    #[arg(long, short = 'f', value_name = "FORMAT", default_value = "mermaid")]
+    pub format: UmlFormat,
+
+    /// Type of diagram to generate.
+    #[arg(long, short = 't', value_name = "TYPE", default_value = "class")]
+    pub diagram_type: DiagramType,
+
+    /// Output file path (default: stdout).
+    #[arg(long, short = 'o', value_name = "FILE")]
+    pub output: Option<SystemPathBuf>,
+
+    /// Include private members (names starting with underscore).
+    #[arg(long)]
+    pub include_private: bool,
+
+    /// Include dunder methods (__init__, __str__, etc.).
+    #[arg(long, default_value = "true")]
+    pub include_dunder: bool,
+
+    /// Maximum depth for following relationships.
+    #[arg(long, value_name = "DEPTH", default_value = "3")]
+    pub max_depth: usize,
+
+    /// Show visibility symbols (+, -, #) in the diagram.
+    #[arg(long, default_value = "true")]
+    pub show_visibility: bool,
+
+    /// Show type annotations in the diagram.
+    #[arg(long, default_value = "true")]
+    pub show_types: bool,
+
+    /// Title for the diagram.
+    #[arg(long, value_name = "TITLE")]
+    pub title: Option<String>,
+
+    #[clap(flatten)]
+    pub verbosity: Verbosity,
+}
+
+/// Output format for UML diagrams.
+#[derive(Copy, Clone, Hash, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum UmlFormat {
+    /// Graphviz DOT format (.dot, .gv)
+    #[value(name = "dot")]
+    Dot,
+    /// `PlantUML` format (.puml, .plantuml)
+    #[value(name = "plantuml")]
+    PlantUml,
+    /// `MermaidJS` format (.mmd) - default
+    #[default]
+    #[value(name = "mermaid")]
+    Mermaid,
+}
+
+impl From<UmlFormat> for ty_uml::OutputFormat {
+    fn from(format: UmlFormat) -> Self {
+        match format {
+            UmlFormat::Dot => ty_uml::OutputFormat::Dot,
+            UmlFormat::PlantUml => ty_uml::OutputFormat::PlantUml,
+            UmlFormat::Mermaid => ty_uml::OutputFormat::Mermaid,
+        }
+    }
+}
+
+/// Type of UML diagram to generate.
+#[derive(Copy, Clone, Hash, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
+pub(crate) enum DiagramType {
+    /// Class diagram showing classes, inheritance, and members.
+    #[default]
+    #[value(name = "class")]
+    Class,
+    /// Module dependency diagram.
+    #[value(name = "module")]
+    Module,
+    /// Function call graph.
+    #[value(name = "call")]
+    Call,
+    /// All diagram types.
+    #[value(name = "all")]
+    All,
 }
 
 /// A list of rules to enable or disable with a given severity.
